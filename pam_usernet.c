@@ -75,6 +75,24 @@ int bind_etc(const char *name)
 	if(rv == -1)
 		goto alloc_fail;
 
+	/* Make /etc a mount point, so we can apply a propagation policy to it
+	 * below */
+	rv = mount("/etc", "/etc", "none", MS_BIND, NULL);
+	if (rv == -1) {
+		syslog (LOG_ERR, "mount --bind %s %s: %s",
+			etc_netns_path, etc_netns_path, strerror(errno));
+		return -1;
+	}
+
+	/* Don't let bind mounts from /etc/netns/<name>/<file> -> /etc/<file>
+	 * propagate back to the parent namespace */
+	if (mount("", "/etc", "none", MS_PRIVATE, NULL)) {
+		syslog (LOG_ERR, "\"mount --make-private /%s\" failed: %s\n",
+			etc_netns_path, strerror(errno));
+		return -1;
+	}
+
+
 	DIR *dir = opendir(etc_netns_path);
 	if (!dir)
 		return -1;
@@ -120,6 +138,49 @@ alloc_fail:
 	} else {
 		return 0;
 	}
+}
+
+/**
+ * remount_sys: Mount a version of /sys that describes the new network namespace
+ */
+int remount_sys(const char *name)
+{
+	unsigned long mountflags = 0;
+
+	/* Temporarily make '/' private until we're done re-mounting /sys */
+	if (mount("", "/", "none", MS_PRIVATE | MS_REC, NULL)) {
+		syslog (LOG_ERR, "\"mount --make-rprivate /\" failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	if (umount2("/sys", MNT_DETACH) < 0) {
+		struct statvfs fsstat;
+
+		/* If this fails, perhaps there wasn't a sysfs instance
+		 * mounted. Good. */
+		if (statvfs("/sys", &fsstat) == 0) {
+			/* We couldn't umount the sysfs, we'll attempt to
+			 * overlay it. A read-only instance can't be shadowed
+			 * with a read-write one. */
+			if (fsstat.f_flag & ST_RDONLY)
+				mountflags = MS_RDONLY;
+		}
+	}
+
+	if (mount(name, "/sys", "sysfs", mountflags, NULL) < 0) {
+		syslog (LOG_ERR, "mount of /sys failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	/* Make '/' shared again! */
+	if (mount("", "/", "none", MS_SHARED | MS_REC, NULL)) {
+		syslog (LOG_ERR, "\"mount --make-rshared /\" failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	return 0;
 }
 
 /**
@@ -264,31 +325,9 @@ int pam_sm_open_session(pam_handle_t *pamh, int flags, int argc, const char **ar
 		syslog (LOG_ERR, "unshare(mount) failed: %s\n", strerror(errno));
 		goto close_log_and_abort;
 	}
-	/* Don't let any mounts propagate back to the parent */
-	if (mount("", "/", "none", MS_SLAVE | MS_REC, NULL)) {
-		fprintf(stderr, "\"mount --make-rslave /\" failed: %s\n",
-			strerror(errno));
-		goto close_log_and_abort;
-	}
 
-	/* Mount a version of /sys that describes the network namespace */
-	unsigned long mountflags = 0;
-
-	if (umount2("/sys", MNT_DETACH) < 0) {
-		struct statvfs fsstat;
-
-		/* If this fails, perhaps there wasn't a sysfs instance
-		 * mounted. Good. */
-		if (statvfs("/sys", &fsstat) == 0) {
-			/* We couldn't umount the sysfs, we'll attempt to
-			 * overlay it. A read-only instance can't be shadowed
-			 * with a read-write one. */
-			if (fsstat.f_flag & ST_RDONLY)
-				mountflags = MS_RDONLY;
-		}
-	}
-	if (mount(user, "/sys", "sysfs", mountflags, NULL) < 0) {
-		syslog (LOG_ERR, "mount of /sys failed: %s\n", strerror(errno));
+	if(remount_sys(user) == -1) {
+		syslog (LOG_ERR, "remounting /sys failed");
 		goto close_log_and_abort;
 	}
 
