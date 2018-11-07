@@ -35,6 +35,6 @@ AC_CHECK_HEADERS([security/pam_modules.h security/pam_appl.h],
 # Checks for typedefs, structures, and compiler characteristics.
 
 # Checks for library functions.
-AC_CHECK_FUNCS([strcmp])
+AC_CHECK_FUNCS([strcmp, asprintf])
 
 AC_OUTPUT([Makefile])
